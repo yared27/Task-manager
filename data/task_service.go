@@ -1,94 +1,125 @@
 package data
+
 import (
+	"context"
 	"errors"
-	"strconv"
-	"sync"
 	"task_manager/models"
 	"time"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 var ErrorNotFound = errors.New("Task not found")
 
-type service struct {
-	mu sync.RWMutex
-	store map[int]models.Task
-	next int
+type TaskService struct {
+	Collection *mongo.Collection
 }
 
-var svc = &service{
-	store:make(map[int]models.Task),
-	next:1,
+func  NewTaskService(col *mongo.Collection) *TaskService{
+	return &TaskService{Collection: col}
+
 }
-func ListTasks() []models.Task {
-	svc.mu.RLock()
-	defer svc.mu.RUnlock()
+func (s *TaskService)ListTasks() ([]models.Task,error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	cursor,err := s.Collection.Find(ctx, bson.M{})
+	if err != nil{
+		return nil,err
+	}
+	defer cursor.Close(ctx)
+	var tasks []models.Task
+	if err := cursor.All(ctx, &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
 
-	tasks := make([]models.Task,0, len(svc.store))
+func (s *TaskService) GetTask(id string) (models.Task, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
 
-	for _, t := range svc.store{
-		tasks = append(tasks,t)
+	// parse the id as an integer and lookup in the in-memory store
+	objectID, err := primitive.ObjectIDFromHex(id)
+
+	if err != nil {
+		return models.Task{}, err
 	}
 
-	return  tasks
+	var task models.Task
+	err = s.Collection.FindOne(ctx, bson.M{"_id":objectID}).Decode(&task)
+
+	return task, err
 }
 
-func GetTask(id int)(models.Task, error){
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	t, ok := svc.store[id]
-	if !ok{
-		return models.Task{}, ErrorNotFound
+func (s *TaskService) CreateTask(task models.Task) (primitive.ObjectID, error){
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	
+	defer cancel()
+	now := primitive.NewDateTimeFromTime(time.Now())
+	task.CreatedAt = now
+	task.UpdatedAt = now
+
+	task.ID = primitive.NilObjectID
+	result, err := s.Collection.InsertOne(ctx, task)
+
+	if err != nil {
+		return primitive.NilObjectID, err
 	}
-	return  t,nil
-}
-
-
-func CreateTask(title, description string, due time.Time, status string) models.Task{
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	t := models.Task{
-		ID:  strconv.Itoa(svc.next),
-		Title: title,
-		Description: description,
-		DueDate: due,
-		Status: status,
-	}
-	svc.store[svc.next] = t
-	svc.next++
-	return t
-}
-
-func UpdateTask(id int, title, description string, due time.Time, status string) (models.Task, error){
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	_,ok := svc.store[id]
+	oid, ok := result.InsertedID.(primitive.ObjectID)
 
 	if !ok {
-		return models.Task{}, ErrorNotFound
+		return primitive.NilObjectID, errors.New("failed to get inserted ID")
 	}
-
-	t := models.Task{
-		ID: strconv.Itoa(id),
-		Title: title,
-		Description: description,
-		DueDate: due,
-		Status: status,
-	}
-	svc.store[id] = t
-	return t,nil
-
+	return oid, nil
 }
 
-func DeleteTask(id int) error {
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
+func (s *TaskService)UpdateTask(id string, updatedTask *models.Task)error{
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
 
-	_,ok := svc.store[id]
+	objectID, _ := primitive.ObjectIDFromHex(id)
+	updatedTask.UpdatedAt = primitive.NewDateTimeFromTime(time.Now())
 
-	if !ok{
-		return ErrorNotFound
+	updated := bson.M{
+			"$set": bson.M{
+			"title":       updatedTask.Title,
+			"description": updatedTask.Description,
+			"dueDate":    updatedTask.DueDate,
+			"status":      updatedTask.Status,
+			"updatedAt":  updatedTask.UpdatedAt,
+		},
+	}
+	result, err := s.Collection.UpdateOne(ctx, bson.M{"_id": objectID}, updated)
+
+	if err != nil {	
+		return err
 	}
 
-	delete(svc.store, id)
+	if result.MatchedCount == 0 {
+		return errors.New("task not found")
+	}
+
+	return nil
+}
+
+
+func (s *TaskService)DeleteTask(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	objectID, err := primitive.ObjectIDFromHex(id)
+
+	if err != nil {
+		return err
+	}
+
+	result, err := s.Collection.DeleteOne(ctx, bson.M{"_id": objectID})
+
+	if err != nil {
+		return err
+	}
+	if result.DeletedCount == 0 {
+		return errors.New("task not found")
+	}
 	return nil
 }

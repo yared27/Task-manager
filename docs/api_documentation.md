@@ -90,7 +90,6 @@ Update a specific task.
 
 Request Body
 {
-  "title": "Updated Task",
   "description": "Updated description",
   "due_date": "2025-12-02T12:00:00Z",
   "status": "in-progress"
