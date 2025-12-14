@@ -1,36 +1,34 @@
 package router
 
 import (
-	"os"
-	"task_manager/config"
 	"task_manager/controllers"
-	"task_manager/data"
+	"task_manager/middleware"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 )
 
-func SetupRouter() *gin.Engine {
+func SetupRouter(ctrl *controllers.TaskController) *gin.Engine {
 	r := gin.Default()
-	godotenv.Load()
-	client, err := config.ConnectDB()
-	if err != nil {
-		panic(err)
-	}
 
-	db := client.Database(os.Getenv("DB_NAME"))
-	taskCollection := db.Collection("Tasks")
-	taskService := data.NewTaskService(taskCollection)
-	taskController := controllers.NewTaskController(taskService)
+	// Public routes
+	r.POST("/register", ctrl.Register)
+	r.POST("/login", ctrl.Login)
 
-	api := r.Group("/tasks")
-	{
-		api.GET("/", taskController.GetAllTasks)
-		api.GET("/:id", taskController.GetTaskByID)
-		api.POST("/", taskController.CreateTask)
-		api.PUT("/:id", taskController.UpdateTask)
-		api.DELETE("/:id", taskController.DeleteTask)
-	}
+	// Authenticated routes
+	auth := r.Group("/")
+	auth.Use(middleware.AuthMiddleware())
+
+	auth.GET("/tasks", ctrl.GetAllTasks)
+	auth.GET("/tasks/:id", ctrl.GetTaskByID)
+
+	// Admin-only routes
+	admin := auth.Group("/")
+	admin.Use(middleware.AdminOnly())
+
+	admin.POST("/tasks", ctrl.CreateTask)
+	admin.PUT("/tasks/:id", ctrl.UpdateTask)
+	admin.DELETE("/tasks/:id", ctrl.DeleteTask)
+	admin.PUT("/promote/:id", ctrl.PromoteUser)
 
 	return r
 }

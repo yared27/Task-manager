@@ -4,26 +4,103 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"task_manager/data"
+	"task_manager/middleware"
 	"task_manager/models"
+
+	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type TaskController struct {
-	Service *data.TaskService
+	UserService *data.UserService
+	TaskService *data.TaskService
 }
 
-// Constructor
-func NewTaskController(s *data.TaskService) *TaskController {
-	return &TaskController{Service: s}
+// ---------------- Constructor ----------------
+func NewTaskController(userService *data.UserService, taskService *data.TaskService) *TaskController {
+	return &TaskController{
+		UserService: userService,
+		TaskService: taskService,
+	}
 }
 
-// ------------------------------------------------------------
-// GET /tasks
-// ------------------------------------------------------------
+// ---------------- AUTH ----------------
+
+// Register a new user
+func (ctl *TaskController) Register(c *gin.Context) {
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user, err := ctl.UserService.Register(req.Username, req.Password)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, user)
+}
+
+// Login user and return JWT token
+func (ctl *TaskController) Login(c *gin.Context) {
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user, err := ctl.UserService.Authenticate(req.Username, req.Password)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	token, err := middleware.GenerateToken(user.ID.Hex(), user.Username, user.Role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": token})
+}
+
+// Promote user to admin (MongoDB)
+func (ctl *TaskController) PromoteUser(c *gin.Context) {
+	idHex := c.Param("id")
+	userID, err := primitive.ObjectIDFromHex(idHex)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	if err := ctl.UserService.PromoteUser(userID); err != nil {
+		if err == data.ErrorNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "user promoted to admin"})
+}
+
+// ---------------- TASKS ----------------
+
+// Get all tasks
 func (tc *TaskController) GetAllTasks(c *gin.Context) {
-	tasks, err := tc.Service.ListTasks()
+	tasks, err := tc.TaskService.ListTasks()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -31,40 +108,35 @@ func (tc *TaskController) GetAllTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
-// ------------------------------------------------------------
-// GET /tasks/:id
-// ------------------------------------------------------------
+// Get task by ID
 func (tc *TaskController) GetTaskByID(c *gin.Context) {
 	id := c.Param("id")
 
-	task, err := tc.Service.GetTask(id)
+	task, err := tc.TaskService.GetTask(id)
 	if err != nil {
 		if err == data.ErrorNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"task": task})
 }
 
-// ------------------------------------------------------------
-// POST /tasks
-// ------------------------------------------------------------
+// Create a new task
 func (tc *TaskController) CreateTask(c *gin.Context) {
 	var input models.TaskInput
 
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Parse due date
 	due, err := time.Parse(time.RFC3339, input.DueDate)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid due_date format (use RFC3339)"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid due_date format"})
 		return
 	}
 
@@ -77,36 +149,32 @@ func (tc *TaskController) CreateTask(c *gin.Context) {
 		UpdatedAt:   primitive.NewDateTimeFromTime(time.Now()),
 	}
 
-	result, err := tc.Service.CreateTask(task)
+	id, err := tc.TaskService.CreateTask(task)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "task created",
-		"id":      result.Hex(),
-	})
+	c.JSON(http.StatusCreated, gin.H{"id": id.Hex()})
 }
 
-// ------------------------------------------------------------
-// PUT /tasks/:id
-// ------------------------------------------------------------
+// Update a task
 func (tc *TaskController) UpdateTask(c *gin.Context) {
 	id := c.Param("id")
 	var input models.TaskInput
 
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	due, err := time.Parse(time.RFC3339, input.DueDate)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid due_date format (use RFC3339)"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid due_date format"})
 		return
 	}
-	updatedTask := models.Task{
+
+	task := models.Task{
 		Title:       input.Title,
 		Description: input.Description,
 		DueDate:     due,
@@ -114,32 +182,28 @@ func (tc *TaskController) UpdateTask(c *gin.Context) {
 		UpdatedAt:   primitive.NewDateTimeFromTime(time.Now()),
 	}
 
-	err = tc.Service.UpdateTask(id, &updatedTask)
-	if err != nil {
+	if err := tc.TaskService.UpdateTask(id, &task); err != nil {
 		if err == data.ErrorNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"task": updatedTask})
+	c.JSON(http.StatusOK, task)
 }
 
-// ------------------------------------------------------------
-// DELETE /tasks/:id
-// ------------------------------------------------------------
+// Delete a task
 func (tc *TaskController) DeleteTask(c *gin.Context) {
 	id := c.Param("id")
 
-	err := tc.Service.DeleteTask(id)
-	if err != nil {
+	if err := tc.TaskService.DeleteTask(id); err != nil {
 		if err == data.ErrorNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
